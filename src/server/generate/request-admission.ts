@@ -18,6 +18,13 @@ interface AdmittedGenerationRequest {
   sessionId: string;
   cancelToken?: string;
   cancellationRegistered: boolean;
+  /**
+   * The bucket a rate-limit slot was charged to, or null when this caller is
+   * not throttled (they brought their own key, or the IP was unattributable).
+   * The route needs it to refund a run that ended before the repository was
+   * ever verified.
+   */
+  rateLimitedClientIp: string | null;
 }
 
 type GenerationRequestAdmission =
@@ -153,6 +160,7 @@ export async function admitGenerationRequest(
       sessionId,
       cancelToken,
       cancellationRegistered,
+      rateLimitedClientIp,
     },
   };
 }

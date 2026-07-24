@@ -83,6 +83,7 @@ import {
   sumGenerationUsage,
 } from "~/server/generate/pricing";
 import { admitGenerationRequest } from "~/server/generate/request-admission";
+import { refundGenerationRateLimit } from "~/server/generate/rate-limit";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -118,6 +119,7 @@ export async function POST(request: Request) {
     sessionId,
     cancelToken,
     cancellationRegistered,
+    rateLimitedClientIp,
   } = admission.value;
   const generationAbortController = new AbortController();
   const deadlineSignal = AbortSignal.timeout(GENERATION_DEADLINE_MS);
@@ -714,7 +716,20 @@ export async function POST(request: Request) {
                 provider: audit.provider,
                 apiKey,
                 message: rawMessage,
+                error,
               });
+          if (normalized.message !== rawMessage) {
+            // The client and the persisted audit only ever see the normalized
+            // message, so this is the one place the original survives.
+            console.error(
+              JSON.stringify({
+                event: "generate.stream.error_redacted",
+                session_id: audit.sessionId,
+                error_code: normalized.errorCode,
+                raw_error: rawMessage.slice(0, 500),
+              }),
+            );
+          }
           audit = withFailure(audit, {
             failureStage: audit.stage || "started",
             validationError: normalized.message,
@@ -815,6 +830,14 @@ export async function POST(request: Request) {
               postResponseTasks,
               recordTiming,
             });
+          } else if (rateLimitedClientIp) {
+            // Nothing billable ran: a bad repository name, a server-side gate
+            // mismatch, or an unreachable GitHub all end here. Charging a slot
+            // would let a typo eat one of the caller's free generations, so
+            // return it once the response no longer depends on it.
+            postResponseTasks.push(() =>
+              refundGenerationRateLimit({ clientIp: rateLimitedClientIp }),
+            );
           }
 
           if (!terminalSent) {

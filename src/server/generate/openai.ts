@@ -4,6 +4,10 @@ import type { ZodType } from "zod";
 
 import type { GenerationTokenUsage } from "~/features/diagram/cost";
 import {
+  rethrowAsUpstreamProviderError,
+  UpstreamProviderError,
+} from "~/server/generate/errors";
+import {
   getProviderLabel,
   supportsTextVerbosity,
   type AIProvider,
@@ -12,6 +16,7 @@ import { normalizeGenerationUsage } from "~/server/generate/pricing";
 
 export type ReasoningEffort = "low" | "medium" | "high";
 type TextVerbosity = "low" | "medium" | "high";
+
 
 const AI_REQUEST_TIMEOUT_MS = 150_000;
 const AI_MAX_RETRIES = 0;
@@ -182,19 +187,21 @@ export async function streamCompletion({
   clientRequestId,
 }: StreamCompletionParams): Promise<StreamCompletionResult> {
   const client = createClient(provider, resolveApiKey(provider, apiKey));
-  const stream = await client.responses.create(
-    {
-      model,
-      stream: true,
-      input: buildMessages(systemPrompt, userPrompt),
-      ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
-      ...(textVerbosity && supportsTextVerbosity(provider, model)
-        ? { text: { verbosity: textVerbosity } }
-        : {}),
-      ...(maxOutputTokens ? { max_output_tokens: maxOutputTokens } : {}),
-    },
-    buildRequestOptions({ provider, signal, clientRequestId }),
-  );
+  const stream = await client.responses
+    .create(
+      {
+        model,
+        stream: true,
+        input: buildMessages(systemPrompt, userPrompt),
+        ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
+        ...(textVerbosity && supportsTextVerbosity(provider, model)
+          ? { text: { verbosity: textVerbosity } }
+          : {}),
+        ...(maxOutputTokens ? { max_output_tokens: maxOutputTokens } : {}),
+      },
+      buildRequestOptions({ provider, signal, clientRequestId }),
+    )
+    .catch(rethrowAsUpstreamProviderError);
 
   let usageSettled = false;
   let resolveUsage!: (usage: GenerationTokenUsage | null) => void;
@@ -262,10 +269,12 @@ export async function streamCompletion({
       usageSettled = true;
       resolveUsage(finalUsage);
     } catch (error) {
-      usageSettled = true;
       resolveUsage(null);
-      throw error;
+      usageSettled = true;
+      rethrowAsUpstreamProviderError(error);
     } finally {
+      // Covers the generator being returned early (a consumer that stops
+      // iterating), which resolves neither branch above.
       if (!usageSettled) {
         resolveUsage(null);
       }
@@ -301,17 +310,19 @@ export async function countInputTokens({
 }: CountInputTokensParams): Promise<number> {
   const client = createClient(provider, resolveApiKey(provider, apiKey));
 
-  const response = await client.responses.inputTokens.count(
-    {
-      model,
-      input: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
-      ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
-    },
-    buildRequestOptions({ provider, signal, clientRequestId }),
-  );
+  const response = await client.responses.inputTokens
+    .count(
+      {
+        model,
+        input: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ],
+        ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
+      },
+      buildRequestOptions({ provider, signal, clientRequestId }),
+    )
+    .catch(rethrowAsUpstreamProviderError);
 
   return response.input_tokens;
 }
@@ -372,10 +383,11 @@ export async function generateStructuredOutput<T>({
         ? error.message
         : "Structured output request failed.";
     if (provider === "openrouter") {
-      throw new Error(
+      throw new UpstreamProviderError(
         `OpenRouter model does not support the required structured graph output: ${message}`,
+        { cause: error },
       );
     }
-    throw error;
+    rethrowAsUpstreamProviderError(error);
   }
 }

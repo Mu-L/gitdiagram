@@ -375,4 +375,33 @@ describe("getGithubData repository input bounds", () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
+
+  it("keeps the GitHub error body out of the thrown message", async () => {
+    const secretBody = JSON.stringify({
+      message:
+        "API rate limit exceeded for installation ID 12345678 on token ghs_serversecret.",
+      documentation_url: "https://docs.github.com/rest/overview",
+    });
+    const errorSpy = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(secretBody, { status: 403 })),
+    );
+
+    // The message reaches the client and the persisted public audit, so it may
+    // carry the status but never the body describing the server's credential.
+    await expect(getGithubData("acme", "demo")).rejects.toThrow(
+      "GitHub request failed (403). Please retry.",
+    );
+    const thrown = await getGithubData("acme", "demo").catch(
+      (error: Error) => error.message,
+    );
+    expect(thrown).not.toContain("ghs_serversecret");
+    expect(thrown).not.toContain("12345678");
+    // The body is still recoverable from the server log.
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("ghs_serversecret");
+    errorSpy.mockRestore();
+  });
 });

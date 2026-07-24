@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   getGithubData: vi.fn(),
   persistAudit: vi.fn(),
   consumeRateLimit: vi.fn(),
+  refundRateLimit: vi.fn(),
   registerActiveGeneration: vi.fn(),
   resolveRequestCredentials: vi.fn(),
   saveDiagram: vi.fn(),
@@ -82,6 +83,7 @@ vi.mock("~/server/http/request-credentials", () => ({
 vi.mock("~/server/generate/rate-limit", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   consumeGenerationRateLimit: mocks.consumeRateLimit,
+  refundGenerationRateLimit: mocks.refundRateLimit,
 }));
 import { POST } from "~/app/api/generate/stream/route";
 
@@ -94,10 +96,13 @@ const estimateCostSummary = {
   usage: { inputTokens: 100, outputTokens: 100, totalTokens: 200 },
 };
 
-function request(body: Record<string, unknown> = {}) {
+function request(
+  body: Record<string, unknown> = {},
+  headers: Record<string, string> = {},
+) {
   return new Request("https://gitdiagram.com/api/generate/stream", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify({ username: "openai", repo: "openai-node", ...body }),
   });
 }
@@ -138,6 +143,7 @@ describe("POST /api/generate/stream", () => {
       allowed: true,
       retryAfterSeconds: 0,
     });
+    mocks.refundRateLimit.mockResolvedValue(undefined);
     mocks.persistAudit.mockResolvedValue(undefined);
     mocks.clearFailureSummary.mockResolvedValue(undefined);
     mocks.saveDiagram.mockResolvedValue(true);
@@ -200,6 +206,37 @@ describe("POST /api/generate/stream", () => {
     expect(mocks.getGithubData).not.toHaveBeenCalled();
     expect(mocks.admitQuota).not.toHaveBeenCalled();
     expect(mocks.streamCompletion).not.toHaveBeenCalled();
+  });
+
+  it("refunds the rate-limit slot when the repository never resolved", async () => {
+    mockEstimate(1_000);
+    mocks.getGithubData.mockRejectedValue(new Error("Repository not found."));
+
+    const response = await POST(
+      request({}, { "x-forwarded-for": "203.0.113.7" }),
+    );
+    const body = await response.text();
+    await mocks.afterCallback?.();
+
+    expect(body).toContain("Repository not found.");
+    // The caller reached a model call for nothing, so the slot goes back.
+    expect(mocks.refundRateLimit).toHaveBeenCalledWith({
+      clientIp: "203.0.113.7",
+    });
+    expect(mocks.streamCompletion).not.toHaveBeenCalled();
+  });
+
+  it("keeps the rate-limit slot once the repository was verified", async () => {
+    mockEstimate(1_000);
+    mocks.streamCompletion.mockRejectedValue(new Error("upstream exploded"));
+
+    const response = await POST(
+      request({}, { "x-forwarded-for": "203.0.113.7" }),
+    );
+    await response.text();
+    await mocks.afterCallback?.();
+
+    expect(mocks.refundRateLimit).not.toHaveBeenCalled();
   });
 
   it("does not throttle a caller who brings their own API key", async () => {

@@ -35,6 +35,19 @@ export type RepositoryPathType = "blob" | "tree";
 
 export const REPOSITORY_TOO_LARGE_ERROR =
   "Repository is too large (>195k tokens) for analysis. Try a smaller repo.";
+// Messages this module authors itself. They describe the caller's own request
+// and carry no upstream response text, so `normalizeGenerationError` is willing
+// to show them verbatim.
+export const GITHUB_REQUEST_TIMEOUT_ERROR =
+  "GitHub request timed out. Please retry.";
+export const REPOSITORY_NOT_FOUND_ERROR = "Repository not found.";
+export const FILE_TREE_UNAVAILABLE_ERROR =
+  "Could not fetch repository file tree.";
+export const EMPTY_REPOSITORY_ERROR =
+  "Could not fetch repository file tree. Repository might be empty or inaccessible.";
+export function buildGithubRequestFailedError(status: number): string {
+  return `GitHub request failed (${status}). Please retry.`;
+}
 const PRIVATE_REPOSITORY_AUTH_REQUIRED_ERROR =
   "A GitHub token is required to analyze a private repository.";
 export const MAX_INCLUDED_FILE_TREE_CHARACTERS = 780_000;
@@ -144,7 +157,7 @@ async function fetchJsonResult<T>(
     });
   } catch (error) {
     if (timeoutSignal.aborted && !signal?.aborted) {
-      throw new Error("GitHub request timed out. Please retry.");
+      throw new Error(GITHUB_REQUEST_TIMEOUT_ERROR);
     }
     throw error;
   }
@@ -158,9 +171,17 @@ async function fetchJsonResult<T>(
   }
 
   if (!response.ok) {
-    throw new Error(
-      `GitHub request failed (${response.status}): ${await response.text()}`,
+    // GitHub's error body describes *our* credential when the server key is the
+    // one being rejected or throttled, and this message reaches the client and
+    // the persisted audit. Keep the body in the server log only.
+    console.error(
+      JSON.stringify({
+        event: "generate.github.request_failed",
+        status: response.status,
+        body: (await response.text()).slice(0, 500),
+      }),
     );
+    throw new Error(buildGithubRequestFailedError(response.status));
   }
 
   return {
@@ -201,7 +222,7 @@ async function getRepoMetadata(
   const data = await fetchJson<GitHubRepoResponse>(
     `https://api.github.com/repos/${username}/${repo}`,
     headers,
-    "Repository not found.",
+    REPOSITORY_NOT_FOUND_ERROR,
     signal,
   );
 
@@ -235,7 +256,7 @@ async function getFileTree(
   const result = await fetchJsonResult<GitHubTreeResponse>(
     url,
     headers,
-    "Could not fetch repository file tree.",
+    FILE_TREE_UNAVAILABLE_ERROR,
     signal,
     cached?.etag,
   );
@@ -264,7 +285,7 @@ async function getFileTree(
 
   if (!paths.length) {
     throw new Error(
-      "Could not fetch repository file tree. Repository might be empty or inaccessible.",
+      EMPTY_REPOSITORY_ERROR,
     );
   }
 
