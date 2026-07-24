@@ -115,15 +115,18 @@ describe("POST /api/generate/cost", () => {
   it("rejects a cross-origin caller before touching GitHub", async () => {
     // Estimation runs the same GitHub ingestion as a real generation, so an
     // open endpoint drains the server's shared API budget.
-    const crossOrigin = new Request("https://gitdiagram.com/api/generate/cost", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Origin: "https://evil.example",
-        "Sec-Fetch-Site": "cross-site",
+    const crossOrigin = new Request(
+      "https://gitdiagram.com/api/generate/cost",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://evil.example",
+          "Sec-Fetch-Site": "cross-site",
+        },
+        body: JSON.stringify({ username: "openai", repo: "openai-node" }),
       },
-      body: JSON.stringify({ username: "openai", repo: "openai-node" }),
-    });
+    );
 
     const response = await POST(crossOrigin);
 

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { after } from "next/server";
 
 import type { GenerationTokenUsage } from "~/features/diagram/cost";
@@ -25,7 +24,6 @@ import {
 import { normalizeGenerationError } from "~/server/generate/errors";
 import { createFinalGenerationCostSummary } from "~/server/generate/final-cost";
 import {
-  registerActiveGeneration,
   startGenerationCancellationPolling,
   unregisterActiveGeneration,
 } from "~/server/generate/cancellation";
@@ -84,14 +82,7 @@ import {
   createCostSummary,
   sumGenerationUsage,
 } from "~/server/generate/pricing";
-import {
-  consumeGenerationRateLimit,
-  getGenerationRateLimitMessage,
-  refundGenerationRateLimit,
-} from "~/server/generate/rate-limit";
-import { parseGenerateRequest } from "~/server/generate/types";
-import { getClientIp } from "~/server/http/client-ip";
-import { resolveRequestCredentials } from "~/server/http/request-credentials";
+import { admitGenerationRequest } from "~/server/generate/request-admission";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -115,124 +106,26 @@ function throwIfAborted(signal: AbortSignal) {
 }
 
 export async function POST(request: Request) {
-  const parsed = await parseGenerateRequest(request);
-  if (!parsed.success) {
-    return new Response(
-      JSON.stringify({
-        ok: false,
-        error: parsed.error,
-        error_code: parsed.errorCode,
-      }),
-      {
-        status: parsed.status,
-        headers: {
-          "Content-Type": "application/json",
-          "Cache-Control": "no-store",
-          "X-Content-Type-Options": "nosniff",
-        },
-      },
-    );
+  const admission = await admitGenerationRequest(request);
+  if (!admission.admitted) {
+    return admission.response;
   }
-
   const {
     username,
     repo,
-    session_id: requestedSessionId,
-    cancel_token: requestedCancelToken,
-  } = parsed.data;
-  const { apiKey, githubPat } = await resolveRequestCredentials(request, {
-    apiKey: parsed.data.api_key,
-    githubPat: parsed.data.github_pat,
-  });
-
-  // Generations billed to the server's own key are the ones that can drain the
-  // shared daily budget, so they are the ones worth throttling per caller.
-  const rateLimitedClientIp = apiKey?.trim() ? null : getClientIp(request);
-  // Returned on the early-reject paths below, which cost the caller a slot
-  // without ever reaching a billable model call.
-  const refundRateLimit = () =>
-    refundGenerationRateLimit({ clientIp: rateLimitedClientIp });
-  if (!apiKey?.trim()) {
-    const rateLimit = await consumeGenerationRateLimit({
-      clientIp: rateLimitedClientIp,
-    });
-    if (!rateLimit.allowed) {
-      return Response.json(
-        {
-          ok: false,
-          error: getGenerationRateLimitMessage(rateLimit.retryAfterSeconds),
-          error_code: "RATE_LIMITED",
-        },
-        {
-          status: 429,
-          headers: {
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-            "Retry-After": String(rateLimit.retryAfterSeconds),
-          },
-        },
-      );
-    }
-  }
-
-  const sessionId = requestedSessionId ?? randomUUID();
-  let cancellationRegistered = false;
-  if (requestedSessionId && requestedCancelToken) {
-    try {
-      cancellationRegistered = await registerActiveGeneration(
-        sessionId,
-        requestedCancelToken,
-      );
-    } catch {
-      console.error(
-        JSON.stringify({
-          event: "generate.cancellation.registration_failed",
-          session_id: sessionId,
-          error: "Cancellation registration is temporarily unavailable.",
-        }),
-      );
-      await refundRateLimit();
-      return Response.json(
-        {
-          ok: false,
-          error: "Generation is temporarily unavailable. Please retry.",
-          error_code: "CANCELLATION_UNAVAILABLE",
-        },
-        {
-          status: 503,
-          headers: {
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-          },
-        },
-      );
-    }
-
-    if (!cancellationRegistered) {
-      await refundRateLimit();
-      return Response.json(
-        {
-          ok: false,
-          error: "Generation session already exists. Please retry.",
-          error_code: "SESSION_CONFLICT",
-        },
-        {
-          status: 409,
-          headers: {
-            "Cache-Control": "no-store",
-            "X-Content-Type-Options": "nosniff",
-          },
-        },
-      );
-    }
-  }
+    apiKey,
+    githubPat,
+    sessionId,
+    cancelToken,
+    cancellationRegistered,
+  } = admission.value;
   const generationAbortController = new AbortController();
   const deadlineSignal = AbortSignal.timeout(GENERATION_DEADLINE_MS);
   const postResponseTasks: Array<() => Promise<void>> = [];
-  if (cancellationRegistered && requestedCancelToken) {
+  if (cancellationRegistered && cancelToken) {
     postResponseTasks.push(async () => {
       try {
-        await unregisterActiveGeneration(sessionId, requestedCancelToken);
+        await unregisterActiveGeneration(sessionId, cancelToken);
       } catch {
         console.warn(
           JSON.stringify({

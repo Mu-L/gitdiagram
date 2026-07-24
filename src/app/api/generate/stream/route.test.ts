@@ -558,6 +558,57 @@ describe("POST /api/generate/stream", () => {
     });
   });
 
+  it("keeps the final cost labeled as an estimate when stage usage is missing", async () => {
+    mockEstimate(100);
+    mocks.admitQuota.mockResolvedValue({
+      admitted: true,
+      reservation: {
+        reservationId: "reservation-1",
+        quotaBucket: "daily",
+        quotaDateUtc: "2026-07-13",
+        quotaResetAt: "2026-07-14T00:00:00.000Z",
+        reservedTokens: 20_000,
+      },
+    });
+    mocks.streamCompletion.mockResolvedValue({
+      stream: (async function* () {
+        yield "<explanation>Usage-free explanation.</explanation>";
+      })(),
+      usagePromise: Promise.resolve(null),
+    });
+    const graph = {
+      groups: [],
+      nodes: [
+        {
+          id: "entrypoint",
+          label: "Entry point",
+          type: "TypeScript module",
+          description: null,
+          groupId: null,
+          path: "src/index.ts",
+          shape: "box",
+        },
+      ],
+      edges: [],
+    };
+    mocks.generateStructuredOutput.mockResolvedValue({
+      output: graph,
+      rawText: JSON.stringify(graph),
+      usage: { inputTokens: 80, outputTokens: 20, totalTokens: 100 },
+    });
+
+    const response = await POST(request());
+    const terminal = readSseEvents(await response.text()).find(
+      (event) => event.status === "complete",
+    );
+
+    expect(terminal?.cost_summary).toMatchObject({
+      kind: "estimate",
+      approximate: true,
+      note: expect.stringContaining("remains a conservative estimate"),
+    });
+  });
+
   it("coalesces explanation deltas without changing their bytes or order", async () => {
     mockEstimate(100);
     mocks.admitQuota.mockResolvedValue({

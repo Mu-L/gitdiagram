@@ -3,7 +3,7 @@ import { upstashEval } from "~/server/storage/upstash";
 const DEFAULT_MAX_GENERATIONS = 8;
 const DEFAULT_WINDOW_SECONDS = 60 * 60;
 
-export const GENERATION_RATE_LIMIT_SCRIPT = `
+const GENERATION_RATE_LIMIT_SCRIPT = `
 local key = KEYS[1]
 local limit = tonumber(ARGV[1])
 local window = tonumber(ARGV[2])
@@ -48,7 +48,7 @@ export function getGenerationRateLimitWindowSeconds(): number {
   );
 }
 
-export const GENERATION_RATE_LIMIT_REFUND_SCRIPT = `
+const GENERATION_RATE_LIMIT_REFUND_SCRIPT = `
 local key = KEYS[1]
 local count = tonumber(redis.call("GET", key))
 if not count or count <= 0 then

@@ -35,7 +35,7 @@ export type RepositoryPathType = "blob" | "tree";
 
 export const REPOSITORY_TOO_LARGE_ERROR =
   "Repository is too large (>195k tokens) for analysis. Try a smaller repo.";
-export const PRIVATE_REPOSITORY_AUTH_REQUIRED_ERROR =
+const PRIVATE_REPOSITORY_AUTH_REQUIRED_ERROR =
   "A GitHub token is required to analyze a private repository.";
 export const MAX_INCLUDED_FILE_TREE_CHARACTERS = 780_000;
 export const MAX_README_BYTES = 750_000;

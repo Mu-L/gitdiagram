@@ -15,6 +15,11 @@ import {
   getJsonObject,
   putGzipJsonObject,
 } from "./r2";
+import {
+  acknowledgePendingBrowseIndexEntries,
+  enqueuePendingBrowseIndexEntry,
+  readPendingBrowseIndexEntries,
+} from "./browse-index-pending";
 
 const LEGACY_PUBLIC_BROWSE_INDEX_KEY = "public/v1/_meta/browse-index.json";
 const PUBLIC_BROWSE_INDEX_KEY = "public/v2/_meta/browse-index.json.gz";
@@ -163,6 +168,30 @@ function insertRecentEntry(
   entries.splice(low, 0, entry);
 }
 
+function applyBrowseIndexEntry(
+  entries: BrowseIndexEntry[],
+  rawEntry: BrowseIndexEntry,
+): boolean {
+  const entry = normalizeBrowseIndexEntry(rawEntry);
+  const existingIndex = entries.findIndex(
+    (candidate) =>
+      candidate.username === entry.username && candidate.repo === entry.repo,
+  );
+  const existingEntry = entries[existingIndex];
+  if (
+    existingEntry &&
+    pickPreferredEntry(existingEntry, entry) === existingEntry
+  ) {
+    return false;
+  }
+
+  if (existingIndex >= 0) {
+    entries.splice(existingIndex, 1);
+  }
+  insertRecentEntry(entries, entry);
+  return true;
+}
+
 function createBrowseSnapshotKey(generation: string): string {
   return `${PUBLIC_BROWSE_SNAPSHOT_PREFIX}${generation}.json.gz`;
 }
@@ -218,23 +247,13 @@ export async function migrateBrowseIndexToAtomicV3(): Promise<number> {
     key: PUBLIC_BROWSE_INDEX_LOCK_KEY,
     ttlMs: BROWSE_INDEX_LOCK_TTL_MS,
     waitMs: BROWSE_INDEX_LOCK_WAIT_MS,
-    callback: async () => {
-      const stored = await readStoredBrowseIndex();
-      if (!stored) {
-        throw new BrowseIndexNotFoundError();
-      }
-      if (stored.activeSnapshotKey) {
-        return stored.entries.length;
-      }
-
-      const entries = normalizeBrowseIndexEntries(stored.entries);
-      return (
-        await writeBrowseIndex({
-          entries,
-          retainedSnapshotKeys: [],
+    callback: async () =>
+      (
+        await materializePendingBrowseIndex({
+          generation: randomUUID(),
+          requireExistingIndex: true,
         })
-      ).length;
-    },
+      ).length,
   });
 }
 
@@ -321,11 +340,12 @@ async function writeBrowseIndex(
   const generation = dependencies.generation ?? randomUUID();
   const updatedAt = now.toISOString();
   const snapshotKey = createBrowseSnapshotKey(generation);
-  const retainedSnapshotKeys = [snapshotKey, ...params.retainedSnapshotKeys]
-    .filter((key, index, keys) => keys.indexOf(key) === index)
-    .slice(0, BROWSE_INDEX_RETAINED_SNAPSHOTS);
+  const retainedSnapshotKeys = Array.from(
+    new Set([snapshotKey, ...params.retainedSnapshotKeys]),
+  ).slice(0, BROWSE_INDEX_RETAINED_SNAPSHOTS);
+  const retainedSnapshotKeySet = new Set(retainedSnapshotKeys);
   const retiredSnapshotKeys = params.retainedSnapshotKeys.filter(
-    (key) => !retainedSnapshotKeys.includes(key),
+    (key) => !retainedSnapshotKeySet.has(key),
   );
 
   // The manifest is the atomic commit point. It is published only after the
@@ -347,26 +367,64 @@ async function writeBrowseIndex(
     entries: params.entries.slice(0, RECENT_BROWSE_INDEX_SIZE),
   } satisfies BrowseIndexManifestPayload);
 
-  for (const retiredSnapshotKey of retiredSnapshotKeys) {
-    try {
-      await deleteObjectFn(getPublicBucket(), retiredSnapshotKey);
-    } catch (error) {
-      console.warn(
-        JSON.stringify({
-          event: "browse.index.snapshot_cleanup_failed",
-          snapshot_key: retiredSnapshotKey,
-          error: error instanceof Error ? error.message : "Unknown error",
-        }),
-      );
-    }
-  }
+  await Promise.all(
+    retiredSnapshotKeys.map(async (retiredSnapshotKey) => {
+      try {
+        await deleteObjectFn(getPublicBucket(), retiredSnapshotKey);
+      } catch (error) {
+        console.warn(
+          JSON.stringify({
+            event: "browse.index.snapshot_cleanup_failed",
+            snapshot_key: retiredSnapshotKey,
+            error: error instanceof Error ? error.message : "Unknown error",
+          }),
+        );
+      }
+    }),
+  );
 
   return params.entries;
+}
+
+async function materializePendingBrowseIndex(params: {
+  generation: string;
+  requireExistingIndex?: boolean;
+}): Promise<BrowseIndexEntry[]> {
+  const [stored, pending] = await Promise.all([
+    readStoredBrowseIndex(),
+    readPendingBrowseIndexEntries(),
+  ]);
+  if (!stored && !pending.length && params.requireExistingIndex) {
+    throw new BrowseIndexNotFoundError();
+  }
+
+  const entries = stored?.activeSnapshotKey
+    ? stored.entries
+    : normalizeBrowseIndexEntries(stored?.entries ?? []);
+  let changed = false;
+  for (const pendingEntry of pending) {
+    changed = applyBrowseIndexEntry(entries, pendingEntry.entry) || changed;
+  }
+
+  const materializedEntries =
+    !stored?.activeSnapshotKey || changed
+      ? await writeBrowseIndex(
+          {
+            entries,
+            retainedSnapshotKeys: stored?.retainedSnapshotKeys ?? [],
+          },
+          { generation: params.generation },
+        )
+      : entries;
+  await acknowledgePendingBrowseIndexEntries(pending);
+  return materializedEntries;
 }
 
 export async function upsertBrowseIndexEntry(
   entry: BrowseIndexEntry,
 ): Promise<BrowseIndexEntry[]> {
+  const normalizedEntry = normalizeBrowseIndexEntry(entry);
+  await enqueuePendingBrowseIndexEntry(normalizedEntry);
   const generation = randomUUID();
   let lastError: unknown;
 
@@ -376,45 +434,7 @@ export async function upsertBrowseIndexEntry(
         key: PUBLIC_BROWSE_INDEX_LOCK_KEY,
         ttlMs: BROWSE_INDEX_LOCK_TTL_MS,
         waitMs: BROWSE_INDEX_LOCK_WAIT_MS,
-        callback: async () => {
-          const stored = await readStoredBrowseIndex();
-          const existingEntries = stored?.entries ?? [];
-          const normalizedEntry = normalizeBrowseIndexEntry(entry);
-          const existingIndex = existingEntries.findIndex(
-            (candidate) =>
-              candidate.username === normalizedEntry.username &&
-              candidate.repo === normalizedEntry.repo,
-          );
-          const existingEntry = existingEntries[existingIndex];
-
-          if (
-            existingEntry &&
-            pickPreferredEntry(existingEntry, normalizedEntry) === existingEntry
-          ) {
-            if (stored?.activeSnapshotKey) {
-              return existingEntries;
-            }
-            return writeBrowseIndex(
-              {
-                entries: existingEntries,
-                retainedSnapshotKeys: [],
-              },
-              { generation },
-            );
-          }
-
-          if (existingIndex >= 0) {
-            existingEntries.splice(existingIndex, 1);
-          }
-          insertRecentEntry(existingEntries, normalizedEntry);
-          return writeBrowseIndex(
-            {
-              entries: existingEntries,
-              retainedSnapshotKeys: stored?.retainedSnapshotKeys ?? [],
-            },
-            { generation },
-          );
-        },
+        callback: () => materializePendingBrowseIndex({ generation }),
       });
     } catch (error) {
       lastError = error;

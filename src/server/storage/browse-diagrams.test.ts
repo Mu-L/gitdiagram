@@ -6,6 +6,14 @@ vi.mock("~/server/storage/distributed-lock", () => ({
   ),
 }));
 
+const pendingMocks = vi.hoisted(() => ({
+  acknowledgePendingBrowseIndexEntries: vi.fn(),
+  enqueuePendingBrowseIndexEntry: vi.fn(),
+  readPendingBrowseIndexEntries: vi.fn(),
+}));
+
+vi.mock("~/server/storage/browse-index-pending", () => pendingMocks);
+
 const storageMocks = vi.hoisted(() => ({
   deleteObject: vi.fn(),
   getGzipJsonObject: vi.fn(),
@@ -32,6 +40,11 @@ const V3_SNAPSHOT_PREFIX = "public/v3/_meta/browse-index-snapshot-";
 
 let gzipObjects: Map<string, unknown>;
 let jsonObjects: Map<string, unknown>;
+let pendingEntries: Array<{
+  field: string;
+  serialized: string;
+  entry: BrowseIndexEntry;
+}>;
 
 function seedAtomicIndex(
   entries: BrowseIndexEntry[],
@@ -68,6 +81,38 @@ describe("browse diagram storage", () => {
     vi.clearAllMocks();
     gzipObjects = new Map();
     jsonObjects = new Map();
+    pendingEntries = [];
+    pendingMocks.enqueuePendingBrowseIndexEntry.mockImplementation(
+      async (entry: BrowseIndexEntry) => {
+        const field = `${entry.username}/${entry.repo}`;
+        const serialized = `pending|${JSON.stringify(entry)}`;
+        pendingEntries = [
+          ...pendingEntries.filter((pending) => pending.field !== field),
+          { field, serialized, entry: structuredClone(entry) },
+        ];
+      },
+    );
+    pendingMocks.readPendingBrowseIndexEntries.mockImplementation(async () =>
+      structuredClone(pendingEntries),
+    );
+    pendingMocks.acknowledgePendingBrowseIndexEntries.mockImplementation(
+      async (
+        acknowledged: Array<{
+          field: string;
+          serialized: string;
+          entry: BrowseIndexEntry;
+        }>,
+      ) => {
+        pendingEntries = pendingEntries.filter(
+          (pending) =>
+            !acknowledged.some(
+              (candidate) =>
+                candidate.field === pending.field &&
+                candidate.serialized === pending.serialized,
+            ),
+        );
+      },
+    );
     storageMocks.getGzipJsonObject.mockImplementation(
       async (_bucket: string, key: string) => {
         const value = gzipObjects.get(key);
@@ -243,6 +288,50 @@ describe("browse diagram storage", () => {
     expect(gzipObjects.get(V3_MANIFEST_KEY)).toMatchObject({
       retainedSnapshotKeys: expect.arrayContaining([previousSnapshotKey]),
     });
+  });
+
+  it("keeps an update journaled when materialization exhausts its retries", async () => {
+    seedAtomicIndex([
+      {
+        username: "older",
+        repo: "repo",
+        lastSuccessfulAt: "2026-03-27T12:00:00.000Z",
+        stargazerCount: 5,
+      },
+    ]);
+    storageMocks.putGzipJsonObject.mockImplementation(
+      async (_bucket: string, key: string, payload: unknown) => {
+        if (key === V3_MANIFEST_KEY) {
+          throw new Error("R2 unavailable");
+        }
+        gzipObjects.set(key, structuredClone(payload));
+      },
+    );
+
+    await expect(
+      upsertBrowseIndexEntry({
+        username: "acme",
+        repo: "demo",
+        lastSuccessfulAt: "2026-03-29T12:00:00.000Z",
+        stargazerCount: 42,
+      }),
+    ).rejects.toThrow("R2 unavailable");
+    expect(pendingEntries).toHaveLength(1);
+    expect(
+      pendingMocks.acknowledgePendingBrowseIndexEntries,
+    ).not.toHaveBeenCalled();
+
+    storageMocks.putGzipJsonObject.mockImplementation(
+      async (_bucket: string, key: string, payload: unknown) => {
+        gzipObjects.set(key, structuredClone(payload));
+      },
+    );
+    await expect(migrateBrowseIndexToAtomicV3()).resolves.toBe(2);
+    expect(pendingEntries).toHaveLength(0);
+    const page = await getBrowsePage({});
+    expect(page.items[0]).toEqual(
+      expect.objectContaining({ username: "acme", repo: "demo" }),
+    );
   });
 
   it("keeps the committed index when cleanup of the previous snapshot fails", async () => {
