@@ -9,12 +9,12 @@ import type { AIProvider } from "~/server/generate/model-config";
 import {
   EXPLANATION_MAX_OUTPUT_TOKENS,
   GRAPH_MAX_OUTPUT_TOKENS,
+  GRAPH_RETRY_INPUT_BUFFER_TOKENS,
 } from "~/server/generate/pricing";
 
 const DEFAULT_DAILY_LIMIT_TOKENS = 10_000_000;
 const DEFAULT_MODEL_FAMILY = "gpt-5.6-terra";
 const COMPLIMENTARY_QUOTA_BUCKET = "openai-complimentary-small-models";
-const RETRY_INPUT_BUFFER_TOKENS = 2_000;
 const QUOTA_FINALIZATION_ATTEMPTS = 2;
 const DEFAULT_DENIAL_MESSAGE =
   "GitDiagram's free daily OpenAI capacity is used up for now. I'm a solo student engineer running this free and open source, so please try again after 00:00 UTC or use your own OpenAI API key.";
@@ -172,7 +172,7 @@ export function buildComplimentaryStageTokenBound(
     estimate.graphRepairStaticInputTokens +
     EXPLANATION_MAX_OUTPUT_TOKENS +
     GRAPH_MAX_OUTPUT_TOKENS +
-    RETRY_INPUT_BUFFER_TOKENS +
+    GRAPH_RETRY_INPUT_BUFFER_TOKENS +
     GRAPH_MAX_OUTPUT_TOKENS
   );
 }

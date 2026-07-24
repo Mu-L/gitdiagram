@@ -295,7 +295,7 @@ describe("getGithubData repository input bounds", () => {
     expect(treeRequests).toBe(2);
   });
 
-  it("never stores or conditionally reuses private repository trees", async () => {
+  it("rejects private repository access without caller credentials before reading contents", async () => {
     const fetchMock = vi.fn(
       async (input: string | URL | Request, init?: RequestInit) => {
         const url = String(input);
@@ -324,8 +324,55 @@ describe("getGithubData repository input bounds", () => {
     );
     vi.stubGlobal("fetch", fetchMock);
 
-    await getGithubData("acme", "demo");
-    await getGithubData("acme", "demo");
-    expect(fetchMock).toHaveBeenCalledTimes(6);
+    await expect(getGithubData("acme", "demo")).rejects.toThrow(
+      "A GitHub token is required to analyze a private repository.",
+    );
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.github.com/repos/acme/demo",
+      expect.any(Object),
+    );
+  });
+
+  it("reads private repository contents only with caller credentials", async () => {
+    const fetchMock = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        if (url.endsWith("/repos/acme/demo")) {
+          return jsonResponse({ default_branch: "main", private: true });
+        }
+        if (url.includes("/git/trees/main?recursive=1")) {
+          expect(new Headers(init?.headers).has("if-none-match")).toBe(false);
+          return new Response(
+            JSON.stringify({
+              truncated: false,
+              tree: [{ path: "src/private.ts", type: "blob" }],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/repos/acme/demo/readme")) {
+          return jsonResponse({
+            size: 9,
+            content: Buffer.from("# Private").toString("base64"),
+            encoding: "base64",
+          });
+        }
+        throw new Error(`Unexpected GitHub URL: ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      getGithubData("acme", "demo", "github_pat_caller"),
+    ).resolves.toMatchObject({
+      fileTree: "src/private.ts",
+      readme: "# Private",
+      isPrivate: true,
+    });
+    expect(getGitHubApiHeaders).toHaveBeenCalledWith({
+      githubPat: "github_pat_caller",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

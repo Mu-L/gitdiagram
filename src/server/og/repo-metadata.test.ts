@@ -56,6 +56,27 @@ describe("getRepoSocialMetadata", () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  it("does not expose metadata for repositories visible only to server credentials", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          default_branch: "main",
+          private: true,
+          language: "TypeScript",
+          stargazers_count: 42,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await expect(getRepoSocialMetadata("owner", "private")).resolves.toEqual({
+      defaultBranch: null,
+      isPrivate: null,
+      language: null,
+      stargazerCount: null,
+    });
+  });
+
   it("records upstream failures as warnings while preserving the fallback card", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(null, { status: 503 }),

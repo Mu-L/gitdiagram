@@ -23,6 +23,7 @@ import {
   type GenerationEstimateResult,
 } from "~/server/generate/cost-estimate";
 import { normalizeGenerationError } from "~/server/generate/errors";
+import { createFinalGenerationCostSummary } from "~/server/generate/final-cost";
 import {
   registerActiveGeneration,
   startGenerationCancellationPolling,
@@ -767,18 +768,13 @@ export async function POST(request: Request) {
             diagram,
           });
 
-          const finalCost = accounting.hasCompleteMeasuredUsage
-            ? createCostSummary({
-                kind: "actual",
-                model,
-                usage: sumGenerationUsage(...accounting.actualUsages),
-                approximate: false,
-              })
-            : {
-                ...estimate.costSummary,
-                kind: "actual" as const,
-                note: "Some stage usage was unavailable, so the final cost remains approximate.",
-              };
+          const finalCost = createFinalGenerationCostSummary({
+            model,
+            estimate,
+            actualUsages: accounting.actualUsages,
+            hasCompleteMeasuredUsage: accounting.hasCompleteMeasuredUsage,
+            graphAttemptCount: audit.graphAttempts.length,
+          });
           throwIfAborted(generationAbortController.signal);
           audit = withFinalCost(audit, finalCost);
           audit = withSuccess(

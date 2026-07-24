@@ -52,6 +52,9 @@ export async function getRepoSocialMetadata(
     }
 
     const data = (await response.json()) as RepoMetadataResponse;
+    if (data.private === true) {
+      return EMPTY_REPO_SOCIAL_METADATA;
+    }
 
     return {
       defaultBranch:

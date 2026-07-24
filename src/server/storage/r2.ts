@@ -141,3 +141,14 @@ export async function putGzipJsonObject(
     requestOptions(),
   );
 }
+
+export async function deleteObject(bucket: string, key: string): Promise<void> {
+  const { client: storageClient, s3 } = await getClient();
+  await storageClient.send(
+    new s3.DeleteObjectCommand({
+      Bucket: bucket,
+      Key: key,
+    }),
+    requestOptions(),
+  );
+}

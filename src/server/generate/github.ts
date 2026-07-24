@@ -35,6 +35,8 @@ export type RepositoryPathType = "blob" | "tree";
 
 export const REPOSITORY_TOO_LARGE_ERROR =
   "Repository is too large (>195k tokens) for analysis. Try a smaller repo.";
+export const PRIVATE_REPOSITORY_AUTH_REQUIRED_ERROR =
+  "A GitHub token is required to analyze a private repository.";
 export const MAX_INCLUDED_FILE_TREE_CHARACTERS = 780_000;
 export const MAX_README_BYTES = 750_000;
 export const GITHUB_REQUEST_TIMEOUT_MS = 30_000;
@@ -357,27 +359,35 @@ export async function getGithubData(
   githubPat?: string,
   signal?: AbortSignal,
 ): Promise<GithubData> {
+  const hasCallerGithubPat = Boolean(githubPat?.trim());
   const headers = await getGitHubApiHeaders({ githubPat });
-  const readmeResultPromise = getReadme(username, repo, headers, signal).then(
-    (value) => ({ ok: true as const, value }),
-    (error: unknown) => ({ ok: false as const, error }),
-  );
   const { defaultBranch, isPrivate, stargazerCount } = await getRepoMetadata(
     username,
     repo,
     headers,
     signal,
   );
+
+  // GitHub App installation tokens and the server PAT pool may be able to read
+  // private repositories. They improve public API rate limits, but they must
+  // never become authorization for an anonymous caller.
+  if (isPrivate && !hasCallerGithubPat) {
+    throw new Error(PRIVATE_REPOSITORY_AUTH_REQUIRED_ERROR);
+  }
+
   const [tree, readmeResult] = await Promise.all([
     getFileTree(
       username,
       repo,
       defaultBranch,
       headers,
-      !githubPat?.trim() && !isPrivate,
+      !hasCallerGithubPat && !isPrivate,
       signal,
     ),
-    readmeResultPromise,
+    getReadme(username, repo, headers, signal).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    ),
   ]);
   // A repository without a README is still perfectly diagrammable from its file
   // tree, so only a genuine fetch failure should abort the run.

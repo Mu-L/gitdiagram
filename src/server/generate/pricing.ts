@@ -5,11 +5,13 @@ import type {
 import {
   EXPLANATION_MAX_OUTPUT_TOKENS,
   GRAPH_MAX_OUTPUT_TOKENS,
+  GRAPH_RETRY_INPUT_BUFFER_TOKENS,
 } from "~/server/generate/generation-policy";
 
 export {
   EXPLANATION_MAX_OUTPUT_TOKENS,
   GRAPH_MAX_OUTPUT_TOKENS,
+  GRAPH_RETRY_INPUT_BUFFER_TOKENS,
 } from "~/server/generate/generation-policy";
 
 export interface ModelPricing {
